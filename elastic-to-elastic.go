@@ -78,36 +78,213 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	// filterDetectors, err := getIndices(source, "mitigated-attacks*")
-	// filterDetectors, err := getIndices(source, "irr")
-	// filterDetectors, err := getIndices(source, "mitigator_lookup_log*")
-	// filterDetectors, err := getIndices(source, "public-chart*")
-	// filterDetectors, err := getIndices(source, "rx-tx*")
-	filterDetectors, err := getIndices(source, "stage_ms_reporter*")
+		if err := copyIndiceWithDateRange(source, dest, "filtered_detector*", "2024-02-20T03:30:00.000Z", "2024-12-03T20:30:00.000Z"); err != nil {
+		panic(err)
+	}
+}
+
+func copyIndiceWithDateRange(source, dest *elasticsearch.Client, indexPattern, gte, lte string) error {
+	indices, err := getIndices(source, indexPattern)
+	if err != nil {
+		return fmt.Errorf("failed to get indices: %w", err)
+	}
+
+	wg := sync.WaitGroup{}
+	semaphore := make(chan struct{}, 3)
+
+	for _, index := range indices {
+		wg.Add(1)
+		go func(idx string) {
+			defer wg.Done()
+
+			fmt.Printf("copying %s with date range\n", idx)
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
+			if err := copyIndexDataWithRange(source, dest, idx, gte, lte); err != nil {
+				log.Printf("failed to copy %s data with range: %s", idx, err.Error())
+				return
+			}
+
+			log.Printf("Successfully copied index: %s with date range", idx)
+		}(index)
+	}
+
+	wg.Wait()
+	return nil
+}
+
+func copyIndexDataWithRange(source, dest *elasticsearch.Client, indexName string, gte, lte string) error {
+	searchBody := map[string]interface{}{
+		"query": map[string]interface{}{
+			"bool": map[string]interface{}{
+				"filter": []map[string]interface{}{
+					{
+						"range": map[string]interface{}{
+							"endedAt": map[string]string{
+								"gte": gte,
+								"lte": lte,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	queryJSON, err := json.Marshal(searchBody)
+	if err != nil {
+		return fmt.Errorf("failed to marshal search query: %w", err)
+	}
+
+	size := 5000
+
+	res, err := source.Search(
+		source.Search.WithIndex(indexName),
+		source.Search.WithBody(bytes.NewReader(queryJSON)),
+		source.Search.WithSize(size),
+		source.Search.WithScroll(time.Duration(2)*time.Minute),
+		source.Search.WithSort("_doc"),
+	)
+	if err != nil {
+		return fmt.Errorf("initial search error for index %s: %w", indexName, err)
+	}
+	defer res.Body.Close()
+
+	if res.IsError() {
+		return fmt.Errorf("initial search error for index %s: %s", indexName, res.String())
+	}
+
+	var searchResp SearchResponse
+	if err := json.NewDecoder(res.Body).Decode(&searchResp); err != nil {
+		return fmt.Errorf("failed to decode initial search response for index %s: %w", indexName, err)
+	}
+
+	totalDocs := searchResp.Hits.Total.Value
+	log.Printf("Index %s: Found %d documents matching date range for copy", indexName, totalDocs)
+
+	if totalDocs == 0 {
+		log.Printf("Index %s: No documents found matching the date range, skipping", indexName)
+		return nil
+	}
+
+	res, err = dest.Indices.Exists([]string{indexName})
+	if err != nil {
+		return fmt.Errorf("failed to check if index exists: %w", err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode == 404 {
+		if err := copyMapping(source, dest, indexName); err != nil {
+			return fmt.Errorf("failed to copy mapping for new index %s: %w", indexName, err)
+		}
+	}
+
+	processed := 0
+
+	if len(searchResp.Hits.Hits) > 0 {
+		docs := make([]BulkDoc, len(searchResp.Hits.Hits))
+		for i, hit := range searchResp.Hits.Hits {
+			docs[i] = BulkDoc{
+				Index: hit.Index,
+				ID:    hit.ID,
+				Doc:   hit.Source,
+			}
+		}
+
+		if err := bulkIndex(dest, docs); err != nil {
+			return fmt.Errorf("failed to bulk index first batch for index %s: %w", indexName, err)
+		}
+		processed += len(docs)
+		log.Printf("Index %s: Processed %d/%d documents (initial batch)", indexName, processed, totalDocs)
+	}
+
+	scrollID := searchResp.ScrollID
+	for {
+		if processed >= totalDocs {
+			break
+		}
+
+		scrollRes, err := source.Scroll(
+			source.Scroll.WithScrollID(scrollID),
+			source.Scroll.WithScroll(time.Duration(2)*time.Minute),
+		)
+		if err != nil {
+			return fmt.Errorf("scroll error for index %s: %w", indexName, err)
+		}
+		defer scrollRes.Body.Close()
+
+		if scrollRes.IsError() {
+			return fmt.Errorf("scroll error for index %s: %s", indexName, scrollRes.String())
+		}
+
+		var scrollResp SearchResponse
+		if err := json.NewDecoder(scrollRes.Body).Decode(&scrollResp); err != nil {
+			return fmt.Errorf("failed to decode scroll response for index %s: %w", indexName, err)
+		}
+
+		if len(scrollResp.Hits.Hits) == 0 {
+			break
+		}
+
+		docs := make([]BulkDoc, len(scrollResp.Hits.Hits))
+		for i, hit := range scrollResp.Hits.Hits {
+			docs[i] = BulkDoc{
+				Index: hit.Index,
+				ID:    hit.ID,
+				Doc:   hit.Source,
+			}
+		}
+
+		if err := bulkIndex(dest, docs); err != nil {
+			return fmt.Errorf("failed to bulk index scroll batch for index %s: %w", indexName, err)
+		}
+
+		processed += len(docs)
+		log.Printf("Index %s: Processed %d/%d documents", indexName, processed, totalDocs)
+
+		scrollID = scrollResp.ScrollID
+	}
+
+	clearScrollReq := esapi.ClearScrollRequest{
+		ScrollID: []string{scrollID},
+	}
+	if _, err := clearScrollReq.Do(context.Background(), source); err != nil {
+		log.Printf("Warning: failed to clear scroll context for index %s: %v", indexName, err)
+	}
+
+	return nil
+}
+
+func copyIndice(source, dest *elasticsearch.Client) {
+	indice, err := getIndices(source, "filtered_detector")
 	if err != nil {
 		log.Fatalf("Failed to get indices: %v", err)
 	}
 	wg := sync.WaitGroup{}
 	semaphore := make(chan struct{}, 3)
-	for _, indice := range filterDetectors {
-		wg.Go(func() {
-			fmt.Printf("copying %s\n", indice)
-			semaphore <- struct{}{} // to block the main routine to maximum concurrent fetch
+	for _, indice := range indice {
+		wg.Add(1)
+		go func(idx string) {
+			defer wg.Done()
+			fmt.Printf("copying %s\n", idx)
+			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
-			if err := copyMapping(source, dest, indice); err != nil {
-				fmt.Printf("failed to copy %s from source to dest: %s\n", indice, err.Error())
+			if err := copyMapping(source, dest, idx); err != nil {
+				fmt.Printf("failed to copy %s from source to dest: %s\n", idx, err.Error())
 				return
 			}
-			if err := copyIndexData(source, dest, indice); err != nil {
-				log.Printf("failed to copy %s data: %s", indice, err.Error())
+			if err := copyIndexData(source, dest, idx); err != nil {
+				log.Printf("failed to copy %s data: %s", idx, err.Error())
 				return
 			}
-			log.Printf("Successfully copied index: %s", indice)
+			log.Printf("Successfully copied index: %s", idx)
 
-		})
+		}(indice)
 	}
 	wg.Wait()
 }
+
 func getIndices(client *elasticsearch.Client, pattern string) ([]string, error) {
 	res, err := client.Cat.Indices(
 		client.Cat.Indices.WithIndex(pattern),
@@ -134,6 +311,7 @@ func getIndices(client *elasticsearch.Client, pattern string) ([]string, error) 
 
 	return result, nil
 }
+
 func copyMapping(source, dest *elasticsearch.Client, indexName string) error {
 	res, err := source.Indices.GetMapping(
 		source.Indices.GetMapping.WithIndex(indexName),
@@ -189,7 +367,7 @@ func copyMapping(source, dest *elasticsearch.Client, indexName string) error {
 
 func copyIndexData(source, dest *elasticsearch.Client, indexName string) error {
 
-	size := 5000
+	size := 1000
 
 	res, err := source.Search(
 		source.Search.WithIndex(indexName),
@@ -291,10 +469,8 @@ func copyIndexData(source, dest *elasticsearch.Client, indexName string) error {
 }
 
 func bulkIndex(client *elasticsearch.Client, docs []BulkDoc) error {
-	// Minimum batch size to prevent infinite recursion
 	const minBatchSize = 1
 
-	// Check if batch is too small to split further
 	if len(docs) == 0 {
 		return nil
 	}
@@ -329,24 +505,19 @@ func bulkIndex(client *elasticsearch.Client, docs []BulkDoc) error {
 	}
 	defer res.Body.Close()
 
-	// Check for 413 error
 	if res.StatusCode == 413 {
 		log.Printf("Got 413 error with batch size %d, retrying with smaller batch", len(docs))
 
-		// If we're already at minimum batch size, we can't split further
 		if len(docs) <= minBatchSize {
 			return fmt.Errorf("document too large: cannot process even with batch size of 1")
 		}
 
-		// Split the batch in half
 		mid := len(docs) / 2
 
-		// Process first half
 		if err := bulkIndex(client, docs[:mid]); err != nil {
 			return err
 		}
 
-		// Process second half
 		if err := bulkIndex(client, docs[mid:]); err != nil {
 			return err
 		}
@@ -355,16 +526,13 @@ func bulkIndex(client *elasticsearch.Client, docs []BulkDoc) error {
 	}
 
 	if res.IsError() {
-		// Check if it's another type of error that might include 413 in the body
 		body, err := io.ReadAll(res.Body)
 		if err != nil {
 			return fmt.Errorf("bulk error with status %d: %s", res.StatusCode, res.Status())
 		}
 
-		// Try to parse the error response
 		var bulkResp map[string]interface{}
 		if err := json.Unmarshal(body, &bulkResp); err != nil {
-			// If we can't parse JSON, check if the raw response mentions 413
 			if strings.Contains(string(body), "413") || strings.Contains(string(body), "entity too large") {
 				log.Printf("Got 413 error in response body with batch size %d, retrying with smaller batch", len(docs))
 
@@ -384,9 +552,7 @@ func bulkIndex(client *elasticsearch.Client, docs []BulkDoc) error {
 			return fmt.Errorf("bulk error: %s, body: %s", res.Status(), string(body))
 		}
 
-		// Check for errors in the parsed response
 		if errors, ok := bulkResp["errors"].(bool); ok && errors {
-			// Check if any item has a 413 error
 			if items, ok := bulkResp["items"].([]interface{}); ok {
 				for _, item := range items {
 					if indexItem, ok := item.(map[string]interface{})["index"].(map[string]interface{}); ok {
