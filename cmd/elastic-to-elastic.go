@@ -3,12 +3,15 @@ package main
 import (
 	"bytes"
 	"context"
+	"cpd/utils/es"
+
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -17,68 +20,52 @@ import (
 	"github.com/elastic/go-elasticsearch/v8/esapi"
 )
 
-type IndexInfo struct {
-	Index string `json:"index"`
-}
-
-type SearchResponse struct {
-	ScrollID string `json:"_scroll_id"`
-	Hits     struct {
-		Total struct {
-			Value int `json:"value"`
-		} `json:"total"`
-		Hits []struct {
-			Index  string          `json:"_index"`
-			ID     string          `json:"_id"`
-			Source json.RawMessage `json:"_source"`
-		} `json:"hits"`
-	} `json:"hits"`
-}
-
-type BulkDoc struct {
-	Index string
-	ID    string
-	Doc   json.RawMessage
-}
-
 func main() {
-	sourceCfg := elasticsearch.Config{
-		Addresses: []string{
-			"https://10.202.18.33:9200",
-		},
-		Username: "siwan",
-		Password: "@Siwan@853976",
-		Transport: &http.Transport{
-			MaxIdleConnsPerHost: 10,
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true,
+	sourceCfg := es.EsCfg{
+		Es: elasticsearch.Config{
+			Addresses: []string{
+				"https://10.202.18.33:9200",
+			},
+			Username: "siwan",
+			Password: "@Siwan@853976",
+			Transport: &http.Transport{
+				MaxIdleConnsPerHost: 10,
+				TLSClientConfig: &tls.Config{
+					InsecureSkipVerify: true,
+				},
 			},
 		},
+		Ping: false,
 	}
 
-	source, err := elasticsearch.NewClient(sourceCfg)
+	source, err := es.GetEsInstance(sourceCfg)
 	if err != nil {
-		panic(err)
+		fmt.Printf("failed to connect to source elastic: %s\n", err.Error())
+		os.Exit(1)
 	}
 
-	destCfg := elasticsearch.Config{
-		Addresses: []string{
-			"https://10.202.18.100:9200",
-		},
-		Username: "m.jafari",
-		Password: "njj3bAatnSHWmbK",
-		Transport: &http.Transport{
-			MaxIdleConnsPerHost: 10,
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true,
+	destCfg := es.EsCfg{
+		Es: elasticsearch.Config{
+			Addresses: []string{
+				"https://10.202.18.100:9200",
+			},
+			Username: "m.jafari",
+			Password: "njj3bAatnSHWmbK",
+			Transport: &http.Transport{
+				MaxIdleConnsPerHost: 10,
+				TLSClientConfig: &tls.Config{
+					InsecureSkipVerify: true,
+				},
 			},
 		},
+		Ping: false,
 	}
-	dest, err := elasticsearch.NewClient(destCfg)
+	dest, err := es.GetEsInstance(destCfg)
 	if err != nil {
-		panic(err)
+		fmt.Printf("failed to connect to dest elastic: %s\n", err.Error())
+		os.Exit(1)
 	}
-		if err := copyIndiceWithDateRange(source, dest, "filtered_detector*", "2024-02-20T03:30:00.000Z", "2024-12-03T20:30:00.000Z"); err != nil {
+	if err := copyIndiceWithDateRange(source, dest, "filtered_detector*", "2024-02-20T03:30:00.000Z", "2024-12-03T20:30:00.000Z"); err != nil {
 		panic(err)
 	}
 }
@@ -155,7 +142,7 @@ func copyIndexDataWithRange(source, dest *elasticsearch.Client, indexName string
 		return fmt.Errorf("initial search error for index %s: %s", indexName, res.String())
 	}
 
-	var searchResp SearchResponse
+	var searchResp es.SearchResponse
 	if err := json.NewDecoder(res.Body).Decode(&searchResp); err != nil {
 		return fmt.Errorf("failed to decode initial search response for index %s: %w", indexName, err)
 	}
@@ -183,9 +170,9 @@ func copyIndexDataWithRange(source, dest *elasticsearch.Client, indexName string
 	processed := 0
 
 	if len(searchResp.Hits.Hits) > 0 {
-		docs := make([]BulkDoc, len(searchResp.Hits.Hits))
+		docs := make([]es.BulkDoc, len(searchResp.Hits.Hits))
 		for i, hit := range searchResp.Hits.Hits {
-			docs[i] = BulkDoc{
+			docs[i] = es.BulkDoc{
 				Index: hit.Index,
 				ID:    hit.ID,
 				Doc:   hit.Source,
@@ -218,7 +205,7 @@ func copyIndexDataWithRange(source, dest *elasticsearch.Client, indexName string
 			return fmt.Errorf("scroll error for index %s: %s", indexName, scrollRes.String())
 		}
 
-		var scrollResp SearchResponse
+		var scrollResp es.SearchResponse
 		if err := json.NewDecoder(scrollRes.Body).Decode(&scrollResp); err != nil {
 			return fmt.Errorf("failed to decode scroll response for index %s: %w", indexName, err)
 		}
@@ -227,9 +214,9 @@ func copyIndexDataWithRange(source, dest *elasticsearch.Client, indexName string
 			break
 		}
 
-		docs := make([]BulkDoc, len(scrollResp.Hits.Hits))
+		docs := make([]es.BulkDoc, len(scrollResp.Hits.Hits))
 		for i, hit := range scrollResp.Hits.Hits {
-			docs[i] = BulkDoc{
+			docs[i] = es.BulkDoc{
 				Index: hit.Index,
 				ID:    hit.ID,
 				Doc:   hit.Source,
@@ -299,7 +286,7 @@ func getIndices(client *elasticsearch.Client, pattern string) ([]string, error) 
 		return nil, fmt.Errorf("error response: %s", res.String())
 	}
 
-	var indices []IndexInfo
+	var indices []es.IndexInfo
 	if err := json.NewDecoder(res.Body).Decode(&indices); err != nil {
 		return nil, err
 	}
@@ -384,7 +371,7 @@ func copyIndexData(source, dest *elasticsearch.Client, indexName string) error {
 		return fmt.Errorf("search error: %s", res.String())
 	}
 
-	var searchResp SearchResponse
+	var searchResp es.SearchResponse
 	if err := json.NewDecoder(res.Body).Decode(&searchResp); err != nil {
 		return err
 	}
@@ -395,9 +382,9 @@ func copyIndexData(source, dest *elasticsearch.Client, indexName string) error {
 	processed := 0
 
 	if len(searchResp.Hits.Hits) > 0 {
-		docs := make([]BulkDoc, len(searchResp.Hits.Hits))
+		docs := make([]es.BulkDoc, len(searchResp.Hits.Hits))
 		for i, hit := range searchResp.Hits.Hits {
-			docs[i] = BulkDoc{
+			docs[i] = es.BulkDoc{
 				Index: hit.Index,
 				ID:    hit.ID,
 				Doc:   hit.Source,
@@ -427,7 +414,7 @@ func copyIndexData(source, dest *elasticsearch.Client, indexName string) error {
 			return fmt.Errorf("scroll error: %s", res.String())
 		}
 
-		var scrollResp SearchResponse
+		var scrollResp es.SearchResponse
 		if err := json.NewDecoder(res.Body).Decode(&scrollResp); err != nil {
 			res.Body.Close()
 			return err
@@ -438,9 +425,9 @@ func copyIndexData(source, dest *elasticsearch.Client, indexName string) error {
 			break
 		}
 
-		docs := make([]BulkDoc, len(scrollResp.Hits.Hits))
+		docs := make([]es.BulkDoc, len(scrollResp.Hits.Hits))
 		for i, hit := range scrollResp.Hits.Hits {
-			docs[i] = BulkDoc{
+			docs[i] = es.BulkDoc{
 				Index: hit.Index,
 				ID:    hit.ID,
 				Doc:   hit.Source,
@@ -468,7 +455,7 @@ func copyIndexData(source, dest *elasticsearch.Client, indexName string) error {
 	return nil
 }
 
-func bulkIndex(client *elasticsearch.Client, docs []BulkDoc) error {
+func bulkIndex(client *elasticsearch.Client, docs []es.BulkDoc) error {
 	const minBatchSize = 1
 
 	if len(docs) == 0 {
