@@ -18,9 +18,26 @@ import (
 
 	elasticsearch "github.com/elastic/go-elasticsearch/v8"
 	"github.com/elastic/go-elasticsearch/v8/esapi"
+	"github.com/spf13/cobra"
 )
 
+var rootCmd = &cobra.Command{
+	Use:   "es_to_es",
+	Short: "es_to_es",
+	Long:  `elastic to elastic data copy util`,
+	Run: func(cmd *cobra.Command, args []string) {
+
+	},
+}
+
+func Execute() {
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
 func main() {
+
 	sourceCfg := es.EsCfg{
 		Es: elasticsearch.Config{
 			Addresses: []string{
@@ -65,9 +82,40 @@ func main() {
 		fmt.Printf("failed to connect to dest elastic: %s\n", err.Error())
 		os.Exit(1)
 	}
-	if err := copyIndiceWithDateRange(source, dest, "filtered_detector*", "2024-02-20T03:30:00.000Z", "2024-12-03T20:30:00.000Z"); err != nil {
-		panic(err)
+	rangeCommand := &cobra.Command{
+		Use:   "range",
+		Short: "copy range of data for specified index from source to dest",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := copyIndiceWithDateRange(source, dest, cmd.Flag("index").Value.String(), cmd.Flag("gte").Value.String(), cmd.Flag("lte").Value.String()); err != nil {
+				panic(err)
+			}
+			return nil
+		},
 	}
+	rangeCommand.Flags().String("gte", "", "define start of copy span")
+	rangeCommand.Flags().String("lte", "", "define end of copy span")
+	rangeCommand.Flags().String("index", "", "index to copy")
+	rootCmd.AddCommand(rangeCommand)
+	fullCpCommand := &cobra.Command{
+		Use:   "full",
+		Short: "copy all indices from source to dest",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return nil
+		},
+	}
+	rootCmd.AddCommand(fullCpCommand)
+	cpMapping := &cobra.Command{
+		Use:   "mappings",
+		Short: "only copy mappings of indices from source to dest",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return nil
+		},
+	}
+	rootCmd.AddCommand(cpMapping)
+	Execute()
+	// if err := copyIndiceWithDateRange(source, dest, "filtered_detector*", "2024-02-20T03:30:00.000Z", "2024-12-03T20:30:00.000Z"); err != nil {
+	// 	panic(err)
+	// }
 }
 
 func copyIndiceWithDateRange(source, dest *elasticsearch.Client, indexPattern, gte, lte string) error {
