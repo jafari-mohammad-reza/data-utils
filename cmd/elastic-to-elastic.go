@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"cpd/utils"
 	"cpd/utils/es"
 	"runtime"
 
@@ -95,21 +96,32 @@ func main() {
 			lte, _ := cmd.Flags().GetString("lte")
 			batch, _ := cmd.Flags().GetInt32("batch")
 			timeout, _ := cmd.Flags().GetFloat32("timeout")
+			background, _ := cmd.Flags().GetBool("background")
+
 			gteTime, err := time.Parse(time.DateOnly, gte)
 			if err != nil {
-				return fmt.Errorf("invalid gte format valid format is 2025/01/01: %s", err.Error())
+				return fmt.Errorf("invalid gte format: %s", err.Error())
 			}
 			lteTime, err := time.Parse(time.DateOnly, lte)
 			if err != nil {
-				return fmt.Errorf("invalid gte format valid format is 2025/01/01: %s", err.Error())
+				return fmt.Errorf("invalid lte format: %s", err.Error())
 			}
 			if lteTime.Before(gteTime) {
-				return fmt.Errorf("lte can be time before gte")
+				return fmt.Errorf("lte cannot be before gte")
 			}
-			if err := copyIndiceWithDateRange(source, dest, index, gte, lte, batch, timeout); err != nil {
-				return err
+
+			if background {
+				return utils.RunInBackground(cmd, []string{
+					"copy", "range",
+					"--index", index,
+					"--gte", gte,
+					"--lte", lte,
+					"--batch", fmt.Sprintf("%d", batch),
+					"--timeout", fmt.Sprintf("%f", timeout),
+				})
 			}
-			return nil
+
+			return copyIndiceWithDateRange(source, dest, index, gte, lte, batch, timeout)
 		},
 	}
 	rangeCommand.Flags().String("index", "", "index to copy")
@@ -122,6 +134,8 @@ func main() {
 	rangeCommand.MarkFlagRequired("lte")
 	rangeCommand.Flags().Int32("batch", 10000, "batch size for each iteration")
 	rangeCommand.Flags().Float32("timeout", 0.5, "timeout seconds in each iteration")
+	rangeCommand.Flags().Bool("background", false, "Run the copy operation in background")
+
 	rootCmd.AddCommand(rangeCommand)
 
 	fullCpCommand := &cobra.Command{
@@ -132,27 +146,41 @@ func main() {
 			batch, _ := cmd.Flags().GetInt32("batch")
 			workers, _ := cmd.Flags().GetInt32("workers")
 			timeout, _ := cmd.Flags().GetFloat32("timeout")
+			background, _ := cmd.Flags().GetBool("background")
+
+			if background {
+				return utils.RunInBackground(cmd, []string{
+					"copy", "full",
+					"--index", index,
+					"--batch", fmt.Sprintf("%d", batch),
+					"--workers", fmt.Sprintf("%d", workers),
+					"--timeout", fmt.Sprintf("%f", timeout),
+				})
+			}
 
 			indexes, err := getIndices(source, fmt.Sprintf("%s*", index))
 			if err != nil {
-				log.Fatalf("Failed to get indexes: %v", err)
+				return fmt.Errorf("failed to get indexes: %v", err)
 			}
+
 			wg := sync.WaitGroup{}
 			semaphore := make(chan struct{}, workers)
 			for _, indice := range indexes {
-				wg.Go(func() {
-					semaphore <- struct{}{} // to block the main routine to maximum concurrent fetch
+				wg.Add(1)
+				go func(idx string) {
+					defer wg.Done()
+					semaphore <- struct{}{}
 					defer func() { <-semaphore }()
-					if err := copyMapping(source, dest, indice); err != nil {
-						fmt.Printf("failed to copy %s from source to dest: %s\n", indice, err.Error())
+
+					if err := copyMapping(source, dest, idx); err != nil {
+						log.Printf("failed to copy mapping %s: %s", idx, err.Error())
 						return
 					}
-					if err := copyIndexData(source, dest, indice, batch, timeout); err != nil {
-						log.Printf("failed to copy %s data: %s", indice, err.Error())
+					if err := copyIndexData(source, dest, idx, batch, timeout); err != nil {
+						log.Printf("failed to copy data %s: %s", idx, err.Error())
 						return
 					}
-					log.Printf("Successfully copied index: %s", indice)
-				})
+				}(indice)
 			}
 			wg.Wait()
 			return nil
@@ -163,6 +191,7 @@ func main() {
 	fullCpCommand.Flags().Int32("batch", 10000, "batch size for each iteration")
 	fullCpCommand.Flags().Float32("timeout", 0.5, "timeout seconds in each iteration")
 	fullCpCommand.Flags().Int32("workers", int32(runtime.NumCPU())/3, "number of concurrent workers")
+	fullCpCommand.Flags().Bool("background", false, "Run the copy operation in background")
 	rootCmd.AddCommand(fullCpCommand)
 	cpMapping := &cobra.Command{
 		Use:   "mappings",
