@@ -210,10 +210,9 @@ func main() {
 	rangeCommand.MarkFlagRequired("database")
 
 	rangeCommand.Flags().String("gte", "", "define start of copy span")
-	rangeCommand.MarkFlagRequired("gte")
 
 	rangeCommand.Flags().String("lte", "", "define end of copy span")
-	rangeCommand.MarkFlagRequired("lte")
+
 	rangeCommand.Flags().Int32("batch", 10000, "batch size for each iteration")
 	rangeCommand.Flags().Float32("timeout", 0.5, "timeout seconds in each iteration")
 	rangeCommand.Flags().Bool("background", false, "Run the copy operation in background")
