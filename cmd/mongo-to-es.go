@@ -52,6 +52,7 @@ func main() {
 			batch, _ := cmd.Flags().GetInt32("batch")
 			timeout, _ := cmd.Flags().GetFloat32("timeout")
 			background, _ := cmd.Flags().GetBool("background")
+			mapFile, _ := cmd.Flags().GetBool("mappings")
 
 			if gte != "" {
 				_, err := time.Parse(time.DateOnly, gte)
@@ -122,8 +123,13 @@ func main() {
 				end := min(i+int(batch), len(fetched))
 				chunk := fetched[i:end]
 				wg.Go(func() {
+					if mapFile != "" {
+						if err := loadMappings(mapFile, chunk); err != nil {
+							log.Fatal(err)
+						}
+					}
 					var buf bytes.Buffer
-					for _, item := copy chunk {
+					for _, item := range chunk {
 						actionLine := map[string]any{
 							"index": map[string]any{"_index": index},
 						}
@@ -175,8 +181,8 @@ func main() {
 					}
 
 					if bulkResp.Errors {
-						for _, item := copy bulkResp.Items {
-							for _, op := copy item {
+						for _, item := range bulkResp.Items {
+							for _, op := range item {
 								if op.Status >= 400 {
 									log.Fatal(fmt.Sprintf("item failed: status=%d, error=%v", op.Status, op.Error))
 								}
@@ -214,12 +220,55 @@ func main() {
 	copyCommand.Flags().String("lte", "", "define end of copy span")
 
 	copyCommand.Flags().Int32("batch", 10000, "batch size for each iteration")
-	copyCommand.Flags().Float32("timeout", 0.5, "timeout seconds in each iteration")
+	copyCommand.Flags().Float32("timeout", 0, "timeout seconds in each iteration")
 	copyCommand.Flags().Bool("background", false, "Run the copy operation in background")
+	copyCommand.Flags().String("mappings", "", "mapping file for mapping from mongo to elastic")
 
 	rootCmd.AddCommand(copyCommand)
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func loadMappings(mapPath string, items []bson.M) error {
+	data, err := os.ReadFile(mapPath)
+	if err != nil {
+		return fmt.Errorf("failed to read mapping file: %v", err)
+	}
+
+	var mappings map[string]string
+	if err := json.Unmarshal(data, &mappings); err != nil {
+		return fmt.Errorf("failed to unmarshal mapping file: %v", err)
+	}
+
+	var flatten func(string, any, bson.M)
+	flatten = func(prefix string, v any, result bson.M) {
+		switch val := v.(type) {
+		case bson.M:
+			for k, nested := range val {
+				flatten(prefix+"_"+k, nested, result)
+			}
+		case map[string]interface{}:
+			for k, nested := range val {
+				flatten(prefix+"_"+k, nested, result)
+			}
+		default:
+			if newKey, ok := mappings[prefix]; ok {
+				result[newKey] = v
+			} else {
+				result[prefix] = v
+			}
+		}
+	}
+
+	for i, item := range items {
+		result := bson.M{}
+		for k, v := range item {
+			flatten(k, v, result)
+		}
+		items[i] = result
+	}
+
+	return nil
 }
