@@ -33,12 +33,6 @@ var rootCmd = &cobra.Command{
 	SilenceErrors: true,
 }
 
-func Execute() {
-	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-}
 func main() {
 	rangeCommand := &cobra.Command{
 		Use:   "range",
@@ -206,8 +200,11 @@ func main() {
 	cpMapping.Flags().String("dest-creds", "", "dest-creds elastic credentials")
 	cpMapping.MarkFlagRequired("dest-creds")
 	rootCmd.AddCommand(cpMapping)
-	Execute()
 
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 }
 
 func copyIndiceWithDateRange(source, dest *elasticsearch.Client, indexPattern, gte, lte string, batch int32, timeout float32) error {
