@@ -32,9 +32,9 @@ var rootCmd = &cobra.Command{
 }
 
 func main() {
-	rangeCommand := &cobra.Command{
-		Use:   "range",
-		Short: "copy range of data for specified index from source to dest",
+	copyCommand := &cobra.Command{
+		Use:   "copy",
+		Short: "copy copy of data for specified index from source to dest",
 		RunE: func(cmd *cobra.Command, args []string) error {
 
 			index, _ := cmd.Flags().GetString("index")
@@ -69,7 +69,7 @@ func main() {
 
 			if background {
 				return utils.RunInBackground(cmd, []string{
-					"copy", "range",
+					"copy", "copy",
 					"--index", index,
 					"--gte", gte,
 					"--lte", lte,
@@ -123,7 +123,7 @@ func main() {
 				chunk := fetched[i:end]
 				wg.Go(func() {
 					var buf bytes.Buffer
-					for _, item := range chunk {
+					for _, item := copy chunk {
 						actionLine := map[string]any{
 							"index": map[string]any{"_index": index},
 						}
@@ -175,8 +175,8 @@ func main() {
 					}
 
 					if bulkResp.Errors {
-						for _, item := range bulkResp.Items {
-							for _, op := range item {
+						for _, item := copy bulkResp.Items {
+							for _, op := copy item {
 								if op.Status >= 400 {
 									log.Fatal(fmt.Sprintf("item failed: status=%d, error=%v", op.Status, op.Error))
 								}
@@ -191,33 +191,33 @@ func main() {
 			return nil
 		},
 	}
-	rangeCommand.Flags().String("source", "", "source mongo host")
-	rangeCommand.MarkFlagRequired("source")
-	rangeCommand.Flags().String("source-creds", "", "source-creds mongo credentials")
+	copyCommand.Flags().String("source", "", "source mongo host")
+	copyCommand.MarkFlagRequired("source")
+	copyCommand.Flags().String("source-creds", "", "source-creds mongo credentials")
 
-	rangeCommand.Flags().String("dest", "", "dest elastic host")
-	rangeCommand.MarkFlagRequired("dest")
+	copyCommand.Flags().String("dest", "", "dest elastic host")
+	copyCommand.MarkFlagRequired("dest")
 
-	rangeCommand.Flags().String("dest-creds", "", "dest-creds elastic credentials")
+	copyCommand.Flags().String("dest-creds", "", "dest-creds elastic credentials")
 
-	rangeCommand.Flags().String("index", "", "index to copy into")
-	rangeCommand.MarkFlagRequired("index")
+	copyCommand.Flags().String("index", "", "index to copy into")
+	copyCommand.MarkFlagRequired("index")
 
-	rangeCommand.Flags().String("collection", "", "collection to copy from")
-	rangeCommand.MarkFlagRequired("collection")
+	copyCommand.Flags().String("collection", "", "collection to copy from")
+	copyCommand.MarkFlagRequired("collection")
 
-	rangeCommand.Flags().String("database", "", "database to copy from")
-	rangeCommand.MarkFlagRequired("database")
+	copyCommand.Flags().String("database", "", "database to copy from")
+	copyCommand.MarkFlagRequired("database")
 
-	rangeCommand.Flags().String("gte", "", "define start of copy span")
+	copyCommand.Flags().String("gte", "", "define start of copy span")
 
-	rangeCommand.Flags().String("lte", "", "define end of copy span")
+	copyCommand.Flags().String("lte", "", "define end of copy span")
 
-	rangeCommand.Flags().Int32("batch", 10000, "batch size for each iteration")
-	rangeCommand.Flags().Float32("timeout", 0.5, "timeout seconds in each iteration")
-	rangeCommand.Flags().Bool("background", false, "Run the copy operation in background")
+	copyCommand.Flags().Int32("batch", 10000, "batch size for each iteration")
+	copyCommand.Flags().Float32("timeout", 0.5, "timeout seconds in each iteration")
+	copyCommand.Flags().Bool("background", false, "Run the copy operation in background")
 
-	rootCmd.AddCommand(rangeCommand)
+	rootCmd.AddCommand(copyCommand)
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
