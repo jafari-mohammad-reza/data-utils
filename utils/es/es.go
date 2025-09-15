@@ -2,10 +2,14 @@ package es
 
 import (
 	"bytes"
+
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net/http"
+	"os"
 	"strings"
 
 	elasticsearch "github.com/elastic/go-elasticsearch/v8"
@@ -16,6 +20,31 @@ type EsCfg struct {
 	Ping bool
 }
 
+func GetEsInstanceWithCreds(host, username, passwd string) (*elasticsearch.Client, error) {
+	sourceCfg := EsCfg{
+		Es: elasticsearch.Config{
+			Addresses: []string{
+				host,
+			},
+			Username: username,
+			Password: passwd,
+			Transport: &http.Transport{
+				MaxIdleConnsPerHost: 10,
+				TLSClientConfig: &tls.Config{
+					InsecureSkipVerify: true,
+				},
+			},
+		},
+		Ping: false,
+	}
+
+	source, err := GetEsInstance(sourceCfg)
+	if err != nil {
+		fmt.Printf("failed to connect to source elastic: %s\n", err.Error())
+		os.Exit(1)
+	}
+	return source, nil
+}
 func GetEsInstance(cfg EsCfg) (*elasticsearch.Client, error) {
 	client, err := elasticsearch.NewClient(cfg.Es)
 	if err != nil {

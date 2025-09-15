@@ -7,12 +7,10 @@ import (
 	"cpd/utils/es"
 	"runtime"
 
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
-	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -42,55 +40,11 @@ func Execute() {
 	}
 }
 func main() {
-
-	sourceCfg := es.EsCfg{
-		Es: elasticsearch.Config{
-			Addresses: []string{
-				"https://10.202.18.33:9200",
-			},
-			Username: "siwan",
-			Password: "@Siwan@853976",
-			Transport: &http.Transport{
-				MaxIdleConnsPerHost: 10,
-				TLSClientConfig: &tls.Config{
-					InsecureSkipVerify: true,
-				},
-			},
-		},
-		Ping: false,
-	}
-
-	source, err := es.GetEsInstance(sourceCfg)
-	if err != nil {
-		fmt.Printf("failed to connect to source elastic: %s\n", err.Error())
-		os.Exit(1)
-	}
-
-	destCfg := es.EsCfg{
-		Es: elasticsearch.Config{
-			Addresses: []string{
-				"https://10.202.18.100:9200",
-			},
-			Username: "m.jafari",
-			Password: "njj3bAatnSHWmbK",
-			Transport: &http.Transport{
-				MaxIdleConnsPerHost: 10,
-				TLSClientConfig: &tls.Config{
-					InsecureSkipVerify: true,
-				},
-			},
-		},
-		Ping: false,
-	}
-	dest, err := es.GetEsInstance(destCfg)
-	if err != nil {
-		fmt.Printf("failed to connect to dest elastic: %s\n", err.Error())
-		os.Exit(1)
-	}
 	rangeCommand := &cobra.Command{
 		Use:   "range",
 		Short: "copy range of data for specified index from source to dest",
 		RunE: func(cmd *cobra.Command, args []string) error {
+
 			index, _ := cmd.Flags().GetString("index")
 			gte, _ := cmd.Flags().GetString("gte")
 			lte, _ := cmd.Flags().GetString("lte")
@@ -120,10 +74,25 @@ func main() {
 					"--timeout", fmt.Sprintf("%f", timeout),
 				})
 			}
-
+			source, dest, err := utils.GetEsSourceDest(cmd, args)
+			if err != nil {
+				return err
+			}
 			return copyIndiceWithDateRange(source, dest, index, gte, lte, batch, timeout)
 		},
 	}
+	rangeCommand.Flags().String("source", "", "source elastic host")
+	rangeCommand.MarkFlagRequired("source")
+
+	rangeCommand.Flags().String("source-creds", "", "source-creds elastic credentials")
+	rangeCommand.MarkFlagRequired("source-creds")
+
+	rangeCommand.Flags().String("dest", "", "dest elastic host")
+	rangeCommand.MarkFlagRequired("dest")
+
+	rangeCommand.Flags().String("dest-creds", "", "dest-creds elastic credentials")
+	rangeCommand.MarkFlagRequired("dest-creds")
+
 	rangeCommand.Flags().String("index", "", "index to copy")
 	rangeCommand.MarkFlagRequired("index")
 
@@ -157,7 +126,10 @@ func main() {
 					"--timeout", fmt.Sprintf("%f", timeout),
 				})
 			}
-
+			source, dest, err := utils.GetEsSourceDest(cmd, args)
+			if err != nil {
+				return err
+			}
 			indexes, err := getIndices(source, fmt.Sprintf("%s*", index))
 			if err != nil {
 				return fmt.Errorf("failed to get indexes: %v", err)
@@ -188,6 +160,17 @@ func main() {
 	}
 	fullCpCommand.Flags().String("index", "", "index to copy")
 	fullCpCommand.MarkFlagRequired("index")
+	fullCpCommand.Flags().String("source", "", "source elastic host")
+	fullCpCommand.MarkFlagRequired("source")
+
+	fullCpCommand.Flags().String("source-creds", "", "source-creds elastic credentials")
+	fullCpCommand.MarkFlagRequired("source-creds")
+
+	fullCpCommand.Flags().String("dest", "", "dest elastic host")
+	fullCpCommand.MarkFlagRequired("dest")
+
+	fullCpCommand.Flags().String("dest-creds", "", "dest-creds elastic credentials")
+	fullCpCommand.MarkFlagRequired("dest-creds")
 	fullCpCommand.Flags().Int32("batch", 10000, "batch size for each iteration")
 	fullCpCommand.Flags().Float32("timeout", 0.5, "timeout seconds in each iteration")
 	fullCpCommand.Flags().Int32("workers", int32(runtime.NumCPU())/3, "number of concurrent workers")
@@ -198,6 +181,10 @@ func main() {
 		Short: "only copy mappings of indices from source to dest",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			index, _ := cmd.Flags().GetString("index")
+			source, dest, err := utils.GetEsSourceDest(cmd, args)
+			if err != nil {
+				return err
+			}
 			if err := copyMapping(source, dest, index); err != nil {
 				fmt.Printf("failed to copy %s mappings from source to dest: %s\n", index, err.Error())
 				return err
@@ -207,6 +194,17 @@ func main() {
 	}
 	cpMapping.Flags().String("index", "", "index to copy")
 	cpMapping.MarkFlagRequired("index")
+	cpMapping.Flags().String("source", "", "source elastic host")
+	cpMapping.MarkFlagRequired("source")
+
+	cpMapping.Flags().String("source-creds", "", "source-creds elastic credentials")
+	cpMapping.MarkFlagRequired("source-creds")
+
+	cpMapping.Flags().String("dest", "", "dest elastic host")
+	cpMapping.MarkFlagRequired("dest")
+
+	cpMapping.Flags().String("dest-creds", "", "dest-creds elastic credentials")
+	cpMapping.MarkFlagRequired("dest-creds")
 	rootCmd.AddCommand(cpMapping)
 	Execute()
 
