@@ -24,7 +24,7 @@ import (
 var rootCmd = &cobra.Command{
 	Use:   "",
 	Short: "es_to_es",
-	Long:  `elastic to elastic data copy util`,
+	Long:  `elastic to elastic data util`,
 	Run: func(cmd *cobra.Command, args []string) {
 		_ = cmd.Help()
 		os.Exit(0)
@@ -36,15 +36,16 @@ var rootCmd = &cobra.Command{
 func main() {
 	rangeCommand := &cobra.Command{
 		Use:   "range",
-		Short: "copy range of data for specified index from source to dest",
+		Short: "copy/remove range of data for specified index from source to dest",
 		RunE: func(cmd *cobra.Command, args []string) error {
-
+			action, _ := cmd.Flags().GetString("action")
 			index, _ := cmd.Flags().GetString("index")
 			gte, _ := cmd.Flags().GetString("gte")
 			lte, _ := cmd.Flags().GetString("lte")
 			batch, _ := cmd.Flags().GetInt32("batch")
 			timeout, _ := cmd.Flags().GetFloat32("timeout")
 			background, _ := cmd.Flags().GetBool("background")
+			dateField, _ := cmd.Flags().GetString("date_field")
 
 			gteTime, err := time.Parse(time.DateOnly, gte)
 			if err != nil {
@@ -61,6 +62,8 @@ func main() {
 			if background {
 				return utils.RunInBackground(cmd, []string{
 					"copy", "range",
+					"--action", action,
+					"--date_field", dateField,
 					"--index", index,
 					"--gte", gte,
 					"--lte", lte,
@@ -72,9 +75,20 @@ func main() {
 			if err != nil {
 				return err
 			}
-			return copyIndiceWithDateRange(source, dest, index, gte, lte, batch, timeout)
+			switch action {
+			case "copy":
+			default:
+				return copyIndiceWithDateRange(source, dest, index, dateField, gte, lte, batch, timeout)
+			case "remove":
+				return deleteIndicesDataWithDateRange(dest, index, gte, lte, dateField, timeout)
+			}
+			return nil
 		},
 	}
+
+	rangeCommand.Flags().String("action", "copy", "action to do copy/remove default is copy")
+	rangeCommand.Flags().String("date_field", "@timestamp", "date_field to do the action base on")
+
 	rangeCommand.Flags().String("source", "", "source elastic host")
 	rangeCommand.MarkFlagRequired("source")
 
@@ -207,14 +221,97 @@ func main() {
 	}
 }
 
-func copyIndiceWithDateRange(source, dest *elasticsearch.Client, indexPattern, gte, lte string, batch int32, timeout float32) error {
+func deleteIndicesDataWithDateRange(dest *elasticsearch.Client, indexPattern, gte, lte, dateField string, timeout float32) error {
+	indices, err := getIndices(dest, indexPattern)
+	if err != nil {
+		return fmt.Errorf("failed to get indices: %w", err)
+	}
+
+	wg := sync.WaitGroup{}
+	semaphore := make(chan struct{}, max(runtime.NumCPU()/4, 3))
+
+	for _, index := range indices {
+		wg.Add(1)
+		go func(idx string) {
+			defer wg.Done()
+
+			fmt.Printf("deleting data from %s with date range\n", idx)
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
+			if err := deleteIndexDataWithRange(dest, idx, gte, lte, dateField); err != nil {
+				log.Printf("failed to delete data from %s with range: %s", idx, err.Error())
+				return
+			}
+
+			log.Printf("Successfully deleted data from index: %s with date range", idx)
+			time.Sleep(time.Duration(timeout) * time.Second)
+		}(index)
+	}
+
+	wg.Wait()
+	return nil
+}
+
+func deleteIndexDataWithRange(client *elasticsearch.Client, index, gte, lte, dateField string) error {
+	query := map[string]interface{}{
+		"query": map[string]interface{}{
+			"range": map[string]interface{}{
+				dateField: map[string]interface{}{
+					"gte": gte,
+					"lte": lte,
+				},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(query); err != nil {
+		return fmt.Errorf("encode query: %w", err)
+	}
+
+	res, err := client.DeleteByQuery(
+		[]string{index},
+		&buf,
+		client.DeleteByQuery.WithRefresh(true),
+		client.DeleteByQuery.WithWaitForCompletion(true),
+		client.DeleteByQuery.WithConflicts("proceed"),
+		client.DeleteByQuery.WithSlices("auto"),
+	)
+	if err != nil {
+		return fmt.Errorf("delete by query: %w", err)
+	}
+	defer res.Body.Close()
+
+	if res.IsError() {
+		bodyBytes, _ := io.ReadAll(res.Body)
+		return fmt.Errorf("delete by query error [%s]: %s", res.Status(), string(bodyBytes))
+	}
+
+	var response map[string]interface{}
+	if err := json.NewDecoder(res.Body).Decode(&response); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
+
+	deleted, _ := response["deleted"].(float64)
+	failures, _ := response["failures"].([]interface{})
+
+	if len(failures) > 0 {
+		return fmt.Errorf("delete operation had %d failures", len(failures))
+	}
+
+	log.Printf("Deleted %d documents from %s", int(deleted), index)
+	return nil
+}
+
+func copyIndiceWithDateRange(source, dest *elasticsearch.Client, indexPattern, gte, lte, dateField string, batch int32, timeout float32) error {
 	indices, err := getIndices(source, indexPattern)
 	if err != nil {
 		return fmt.Errorf("failed to get indices: %w", err)
 	}
 
 	wg := sync.WaitGroup{}
-	semaphore := make(chan struct{}, 3)
+	semaphore := make(chan struct{}, max(runtime.NumCPU()/4, 3))
 
 	for _, index := range indices {
 		wg.Add(1)
@@ -225,7 +322,7 @@ func copyIndiceWithDateRange(source, dest *elasticsearch.Client, indexPattern, g
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
 
-			if err := copyIndexDataWithRange(source, dest, idx, gte, lte, batch, timeout); err != nil {
+			if err := copyIndexDataWithRange(source, dest, idx, gte, lte, dateField, batch, timeout); err != nil {
 				log.Printf("failed to copy %s data with range: %s", idx, err.Error())
 				return
 			}
@@ -240,14 +337,14 @@ func copyIndiceWithDateRange(source, dest *elasticsearch.Client, indexPattern, g
 
 type EsQuery map[string]any
 
-func copyIndexDataWithRange(source, dest *elasticsearch.Client, indexName string, gte, lte string, batch int32, timeout float32) error {
+func copyIndexDataWithRange(source, dest *elasticsearch.Client, indexName string, gte, lte, dateField string, batch int32, timeout float32) error {
 	searchBody := EsQuery{
 		"query": EsQuery{
 			"bool": EsQuery{
 				"filter": []EsQuery{
 					{
 						"range": EsQuery{
-							"endedAt": map[string]string{
+							dateField: map[string]string{
 								"gte": gte,
 								"lte": lte,
 							},
